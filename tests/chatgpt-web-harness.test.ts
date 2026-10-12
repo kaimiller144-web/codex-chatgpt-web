@@ -3677,13 +3677,11 @@ describe("ChatGPT outer-native harness v4", () => {
         tool: "exec_command",
         retryable: false,
       });
-      // A short broker TTL may expire before release is handled. A missing snapshot
-      // is explicitly unknown; never fabricate a queued/delivered status.
-      if ((timeoutResult.structuredContent as Record<string, unknown>).pending_at_retirement !== undefined) {
-        expect(timeoutResult.structuredContent).toMatchObject({
-          pending_at_retirement: { pending: 1, queued: 0, delivered: 1 },
-        });
-      }
+      // The short broker TTL may expire before release is handled. Retained
+      // content-free tombstone counts still identify the delivery boundary.
+      expect(timeoutResult.structuredContent).toMatchObject({
+        pending_at_retirement: { pending: 1, queued: 0, delivered: 1 },
+      });
       expect(JSON.stringify(timeoutResult.content)).toContain("did not complete before the MCP transport deadline");
       await retirement;
       expect(externalProgress.snapshot().activeToolCalls).toBe(0);
@@ -3755,6 +3753,35 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   }, 10_000);
 
+  test("expired binding keeps content-free delivery snapshot for a late timeout release", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-expired-counts-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    const token = await broker.register(environment, 40, "expired-counts");
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+    const pending = callTurnBroker(socketPath, {
+      method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", arguments: { cmd: "private-sentinel-not-logged" },
+    }, null).then(() => ({ settled: true }), () => ({ settled: false }));
+    try {
+      await Bun.sleep(80); // Ensure broker TTL expired before receiving release.
+      const result = await callTurnBroker<{ released: boolean; duplicate?: boolean; pendingAtRetirement?: unknown }>(socketPath, {
+        method: "release", bindingId: claimed.bindingId,
+        failure: { code: "codex_tool_timeout", tool: "exec_command", timeoutMs: 90_000 },
+      });
+      expect(result).toEqual({
+        released: true, duplicate: true,
+        pendingAtRetirement: { pending: 1, queued: 1, delivered: 0 },
+      });
+      expect(JSON.stringify(result)).not.toContain("private-sentinel-not-logged");
+      expect(await pending).toEqual({ settled: false });
+      // The release remains idempotent, but cannot execute a retired capability.
+      await expect(callTurnBroker(socketPath, { method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", arguments: { cmd: "forbidden" } })).rejects.toThrow("already finished");
+    } finally {
+      broker.revoke(token);
+      await broker.close();
+    }
+  }, 10_000);
+
   test("a queued native timeout still returns an explicit error after capability expiry", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-queued-timeout-${process.pid}-${Date.now()}`);
     const broker = TurnBroker.forSocket(socketPath);
@@ -3775,11 +3802,9 @@ describe("ChatGPT outer-native harness v4", () => {
       });
       expect(response.isError).toBe(true);
       expect(response.structuredContent).toMatchObject({ code: "codex_tool_timeout", retryable: false });
-      if ((response.structuredContent as Record<string, unknown>).pending_at_retirement !== undefined) {
-        expect(response.structuredContent).toMatchObject({
-          pending_at_retirement: { pending: 1, queued: 1, delivered: 0 },
-        });
-      }
+      expect(response.structuredContent).toMatchObject({
+        pending_at_retirement: { pending: 1, queued: 1, delivered: 0 },
+      });
       await expect(callTurnBroker(socketPath, { method: "claim", token }))
         .rejects.toThrow("already finished");
     } finally {

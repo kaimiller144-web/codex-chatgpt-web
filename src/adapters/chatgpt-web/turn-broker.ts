@@ -275,6 +275,9 @@ export class TurnBroker implements TurnBrokerOwner {
   // can present one. Remembering which turn retired a handle is what separates "you are holding a
   // previous turn's handle" from "this handle never existed".
   private readonly retiredBindings = new Map<string, string>();
+  // A short capability TTL may retire a turn just before the MCP timeout handler
+  // sends its release. Retain only counts (never contents) for that bounded tombstone.
+  private readonly retiredBindingPending = new Map<string, { pending: number; queued: number; delivered: number }>();
   private readonly retiredTokens = new Map<string, string>();
   private acceptingExternalOwners = true;
   private server?: Server;
@@ -648,6 +651,17 @@ export class TurnBroker implements TurnBrokerOwner {
     if (channel.bindingId) {
       this.bindings.delete(channel.bindingId);
       this.retire(this.retiredBindings, channel.bindingId, channel.traceId);
+      this.retiredBindingPending.set(channel.bindingId, {
+        pending: channel.invocations.size,
+        queued: channel.queuedCallIds.length,
+        delivered: channel.deliveredCallIds.size,
+      });
+      // Same bound as retiredBindings: metadata cannot accumulate indefinitely.
+      while (this.retiredBindingPending.size > MAX_RETIRED_TURN_HANDLES) {
+        const oldest = this.retiredBindingPending.keys().next();
+        if (oldest.done) break;
+        this.retiredBindingPending.delete(oldest.value);
+      }
     }
     if (channel.safe) {
       channel.safe.state = "revoked";
@@ -1144,7 +1158,13 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!binding) {
       const retiredTurn = this.retiredBindings.get(bindingId);
       if (request.method === "release" && retiredTurn !== undefined) {
-        return { released: true, duplicate: true };
+        // The previous TTL-expiry path already retired the capability. Preserve
+        // its saved state for timeout reporting without resurrecting any calls.
+        if (request.failure !== undefined) assertRetirementFailure(request.failure);
+        const pendingAtRetirement = request.failure !== undefined
+          ? this.retiredBindingPending.get(bindingId)
+          : undefined;
+        return { released: true, duplicate: true, ...(pendingAtRetirement ? { pendingAtRetirement } : {}) };
       }
       console.error(
         `[chatgpt-web] broker rejected ${request.method} (binding=${bindingId.slice(0, 17)},`
