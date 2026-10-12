@@ -108,6 +108,32 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(compiled.text).not.toContain("internally compacts this response");
 });
 
+test("Full-mode instructions do not turn platform refusals into repeated user authorization requests", () => {
+  const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
+  const token = "turn_12345678901234567890123456789012";
+  const parsed = request("high");
+  parsed.context.messages.push({ role: "assistant", content: [{ type: "text", text: "The user already approved local inspection." }], timestamp: 3 });
+
+  for (const compiled of [
+    compileChatGptWebPrompt(parsed, capabilities, token),
+    compileChatGptWebPrompt(parsed, capabilities, token, {
+      experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS,
+    }),
+  ]) {
+    const text = compiled.text;
+    expect(text).toContain("A platform safety refusal is not a request for the user to authorize the action again");
+    expect(text).toContain("User confirmation cannot override a platform safety refusal.");
+    expect(text).toContain("continue only independent permitted work");
+    expect(text).toContain("use the declared Codex approval flow and wait for the decision");
+    expect(text).toContain("Do not ask the user to reauthorize the same action when the current task context already contains that authorization");
+    expect(text).toContain("A denied approval does not permit a retry through another tool.");
+    expect(text).not.toContain("After an explicit safety or permission refusal for the current action, explain");
+  }
+
+  const browserOnly = compileChatGptWebPrompt(parsed, { ...capabilities, localToolsEnabled: false });
+  expect(browserOnly.text).not.toContain("A platform safety refusal is not a request for the user to authorize the action again");
+});
+
 test("Pro preserves the same native Codex delegation contract as Extra High", () => {
   const token = "turn_12345678901234567890123456789012";
   const capabilities = { localToolsEnabled: true, solAvailable: true, extraHighAvailable: true, proAvailable: true };
