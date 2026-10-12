@@ -3677,6 +3677,13 @@ describe("ChatGPT outer-native harness v4", () => {
         tool: "exec_command",
         retryable: false,
       });
+      // A short broker TTL may expire before release is handled. A missing snapshot
+      // is explicitly unknown; never fabricate a queued/delivered status.
+      if ((timeoutResult.structuredContent as Record<string, unknown>).pending_at_retirement !== undefined) {
+        expect(timeoutResult.structuredContent).toMatchObject({
+          pending_at_retirement: { pending: 1, queued: 0, delivered: 1 },
+        });
+      }
       expect(JSON.stringify(timeoutResult.content)).toContain("did not complete before the MCP transport deadline");
       await retirement;
       expect(externalProgress.snapshot().activeToolCalls).toBe(0);
@@ -3704,6 +3711,80 @@ describe("ChatGPT outer-native harness v4", () => {
       await client.close().catch(() => {});
       if (timedOutToken) broker.revoke(timedOutToken);
       if (replacementToken) broker.revoke(replacementToken);
+      await broker.close();
+    }
+  }, 10_000);
+
+  test.each([false, true])("broker timeout-retirement counts pending calls and their delivery state (delivered=%s)", async delivered => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-retirement-snapshot-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    const token = await broker.register(environment, undefined, "retirement-snapshot");
+    try {
+      const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+      const pending = callTurnBroker(socketPath, {
+        method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", arguments: { cmd: "test" },
+      }, null).then(
+        () => ({ success: true }),
+        () => ({ success: false }),
+      );
+      if (delivered) {
+        const [batch] = await broker.nextToolBatch(token);
+        expect(batch).toMatchObject({ wireName: "exec_command" });
+      } else {
+        // A short scheduler turn lets the queued invoke enter the broker without calling
+        // nextToolBatch (which would change the state we are measuring).
+        await Bun.sleep(25);
+      }
+      const release = await callTurnBroker<{
+        released: boolean;
+        pendingAtRetirement: { pending: number; queued: number; delivered: number };
+      }>(socketPath, { method: "release", bindingId: claimed.bindingId,
+        failure: { code: "codex_tool_timeout", tool: "exec_command", timeoutMs: 90_000 },
+      });
+      expect(release).toEqual({
+        released: true,
+        pendingAtRetirement: { pending: 1, queued: delivered ? 0 : 1, delivered: delivered ? 1 : 0 },
+      });
+      expect(await pending).toEqual({ success: false });
+      await expect(callTurnBroker(socketPath, { method: "claim", token }))
+        .rejects.toThrow("already finished");
+    } finally {
+      broker.revoke(token);
+      await broker.close();
+    }
+  }, 10_000);
+
+  test("a queued native timeout still returns an explicit error after capability expiry", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h3-queued-timeout-${process.pid}-${Date.now()}`);
+    const broker = TurnBroker.forSocket(socketPath);
+    const environment = extractChatGptTurnEnvironment(parsed(environmentXml));
+    environment.tools = [{ name: "exec_command", description: "Run command", parameters: { type: "object" } }];
+    const transport = new StdioClientTransport({
+      command: process.execPath, args: ["src/cli.ts", "mcp", "--broker-socket", socketPath],
+      cwd: process.cwd(), stderr: "pipe",
+    });
+    const client = new Client({ name: "codex-web-queued-timeout-test", version: "1.0.0" });
+    let token: string | undefined;
+    try {
+      await client.connect(transport);
+      token = await broker.register(environment, 1_500, "queued-timeout-turn");
+      // Do not call nextToolBatch: the outer native Codex never picks up this request.
+      const response = await client.callTool({
+        name: "codex_exec", arguments: { turn_token: token, cmd: "never delivered" },
+      });
+      expect(response.isError).toBe(true);
+      expect(response.structuredContent).toMatchObject({ code: "codex_tool_timeout", retryable: false });
+      if ((response.structuredContent as Record<string, unknown>).pending_at_retirement !== undefined) {
+        expect(response.structuredContent).toMatchObject({
+          pending_at_retirement: { pending: 1, queued: 1, delivered: 0 },
+        });
+      }
+      await expect(callTurnBroker(socketPath, { method: "claim", token }))
+        .rejects.toThrow("already finished");
+    } finally {
+      await client.close().catch(() => {});
+      if (token) broker.revoke(token);
       await broker.close();
     }
   }, 10_000);

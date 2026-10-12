@@ -1155,13 +1155,21 @@ export class TurnBroker implements TurnBrokerOwner {
         : "internal Codex turn binding is invalid or expired");
     }
     if (request.method === "release") {
+      // Snapshot the queued/delivered/completed boundary before revocation deletes the
+      // evidence. These are aggregate counts, not a claim about the native tool's
+      // process or approval status. Never include tool arguments or capability IDs.
+      const pendingAtRetirement = request.failure === undefined ? undefined : {
+        pending: binding.channel.invocations.size,
+        queued: binding.channel.queuedCallIds.length,
+        delivered: binding.channel.deliveredCallIds.size,
+      };
       if (request.failure !== undefined) {
         assertRetirementFailure(request.failure);
         this.revoke(binding.token, chatGptToolTimeoutError(request.failure.tool, request.failure.timeoutMs), request.failure);
       } else {
         this.revoke(binding.token);
       }
-      return { released: true };
+      return { released: true, ...(pendingAtRetirement ? { pendingAtRetirement } : {}) };
     }
     if (request.method === "resolve") return { environment: binding.channel.environment };
     this.assertSafeHarnessRunning(binding.channel);

@@ -570,14 +570,19 @@ export async function runChatGptMcpServer(options: {
       // A cancelled/timed-out MCP request no longer has a consumer for the native result. Revoke
       // the whole turn capability so the broker drops the pending invocation and every later call
       // from that abandoned ChatGPT response fails explicitly against its retired binding.
+      let pendingAtRetirement: { pending: number; queued: number; delivered: number } | undefined;
       try {
-        await callTurnBroker(options.brokerSocketPath, {
+        const retired = await callTurnBroker<{
+          released: boolean;
+          pendingAtRetirement?: { pending: number; queued: number; delivered: number };
+        }>(options.brokerSocketPath, {
           method: "release",
           bindingId,
           ...(error instanceof TurnBrokerTimeoutError ? {
             failure: { code: "codex_tool_timeout" as const, tool: wireName(tool), timeoutMs },
           } : {}),
         });
+        pendingAtRetirement = retired.pendingAtRetirement;
       } catch (releaseError) {
         throw new AggregateError(
           [error, releaseError],
@@ -587,13 +592,15 @@ export async function runChatGptMcpServer(options: {
       if (error instanceof TurnBrokerTimeoutError) {
         const toolName = wireName(tool);
         console.error(
-          `[chatgpt-web-mcp] ${toolName} did not complete within ${timeoutMs}ms; retired its turn binding`,
+          `[chatgpt-web-mcp] ${toolName} did not complete within ${timeoutMs}ms; retired its turn binding`
+          + ` pending_at_retirement=${JSON.stringify(pendingAtRetirement ?? null)}`,
         );
         return result({
           code: "codex_tool_timeout",
           tool: toolName,
           timeout_ms: timeoutMs,
           retryable: false,
+          ...(pendingAtRetirement ? { pending_at_retirement: pendingAtRetirement } : {}),
           message: `Codex tool ${toolName} did not complete before the MCP transport deadline. The current turn binding was retired; do not retry it in this ChatGPT response.`,
         }, true);
       }
