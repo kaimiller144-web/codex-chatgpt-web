@@ -9,6 +9,8 @@ export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
   // 2026-09-25 (2933410): power picker inside the markdown composer.
   'button[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"][aria-haspopup="menu"]',
+  // 2026-10-29 (#924): current picker no longer exposes data-codex-intelligence-trigger.
+  'button[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort][aria-haspopup="menu"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',

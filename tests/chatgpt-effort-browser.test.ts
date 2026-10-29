@@ -101,16 +101,18 @@ test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`model selection reuses the $
   } finally { await browser.close(); }
 }, 30_000);
 
-// Captured in the Plus DEV launcher on Oct 8: the new default row is just "6",
-// the model toggle omits aria-hidden, and GPT-6's header shows only the effort.
-test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("GPT-6 and GPT-5.6 remain distinct across effort changes and pre-send verification", async () => {
+// Oct 8: the default model row is "6". Oct 29 (#924): the live control
+// exposes data-selected-reasoning-effort instead of data-codex-intelligence-trigger.
+for (const controlVariant of ["legacy", "2026-10-29"] as const)
+test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)(`GPT-6 and GPT-5.6 verify efforts with ${controlVariant} model control`, async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
   try {
     const page = await browser.newPage();
     await page.setContent(`<form data-chatgpt-composer>
       <div contenteditable="true" data-composer-markdown role="textbox">Draft</div>
-      <button type="button" data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning"
-        aria-haspopup="menu" aria-controls="picker" aria-expanded="false">Medium</button></form>
+      <button type="button" data-composer-navigation-target="reasoning"
+        ${controlVariant === "legacy" ? 'data-codex-intelligence-trigger="true"' : 'aria-label="Select ChatGPT model" data-selected-reasoning-effort="medium"'}
+        aria-haspopup="menu" aria-controls="picker" aria-expanded="false">${controlVariant === "legacy" ? "Medium" : "Thinking effort"}</button></form>
       <div id="picker" role="menu" hidden><div data-model-picker-view="simple">
         <div role="menuitem" data-model-picker-view-toggle="true" tabindex="0"><div data-menu-row-content>Medium</div></div>
         <span id="status" role="status">6 Medium, 2 of 3.</span>
